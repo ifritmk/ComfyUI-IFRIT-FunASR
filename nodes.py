@@ -148,6 +148,25 @@ def _get_model(model_choice, device):
     return model
 
 
+def _release_model(model_choice=None, device=None):
+    for cache_key in list(MODEL_CACHE):
+        if model_choice is not None and cache_key[0] != model_choice:
+            continue
+        if device is not None and cache_key[-1] != device:
+            continue
+        MODEL_CACHE.pop(cache_key, None)
+    try:
+        import gc
+        import torch
+
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+    except Exception:
+        pass
+
+
 def _save_audio_to_temp(audio):
     try:
         import torchaudio
@@ -866,17 +885,7 @@ def _infer_audio(audio, model, device, batch_size_s, unload_model):
 
         result = recognizer.generate(**generate_kwargs)
         if unload_model:
-            for cache_key in list(MODEL_CACHE):
-                if cache_key[0] == model and cache_key[-1] == infer_device:
-                    MODEL_CACHE.pop(cache_key, None)
-            try:
-                import gc
-                import torch
-
-                gc.collect()
-                torch.cuda.empty_cache()
-            except Exception:
-                pass
+            _release_model(model, infer_device)
         return result
     finally:
         try:
@@ -922,7 +931,7 @@ class FunASRTranscribeSRT:
                 "audio": ("AUDIO",),
                 "device": (["auto", "cuda:0", "cpu"],),
                 "batch_size_s": ("INT", {"default": 300, "min": 1, "max": 600, "step": 1}),
-                "unload_model": ("BOOLEAN", {"default": False}),
+                "unload_model": ("BOOLEAN", {"default": True}),
             },
         }
 
@@ -938,8 +947,10 @@ class FunASRTranscribeSRT:
         batch_size_s,
         unload_model,
     ):
-        text_result = _infer_audio(audio, "SenseVoiceSmall", device, batch_size_s, unload_model)
+        infer_device = _get_device(device)
+        text_result = _infer_audio(audio, "SenseVoiceSmall", device, batch_size_s, True)
         text, _ = _normalize_result(text_result)
+        _release_model("SenseVoiceSmall", infer_device)
         timestamp_result = _infer_audio(audio, "Paraformer-Large", device, batch_size_s, unload_model)
         srt = _build_srt_with_text(timestamp_result, text)
         return (srt,)

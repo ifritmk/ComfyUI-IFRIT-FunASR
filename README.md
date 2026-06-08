@@ -49,6 +49,8 @@ F:\code\comfyui\models\Paraformer-Large\fsmn-vad
 
 节点里没有 `model` 参数。Text 节点固定 SenseVoiceSmall，SRT 节点固定 SenseVoiceSmall + Paraformer-Large。
 
+`FunASR SRT` 会在 SenseVoiceSmall 识别完成后立刻释放它，再加载 Paraformer-Large 生成时间轴，避免长音频同时占用两个 ASR 模型的显存。SRT 节点的 `unload_model` 默认开启。
+
 ## 依赖
 
 在 ComfyUI 的 Python 环境中安装：
