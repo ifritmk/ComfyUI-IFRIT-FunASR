@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import urllib.request
 import uuid
 
@@ -303,6 +304,46 @@ def _collect_srt_entries_from_item(item, entries):
             else:
                 text = item.get("text")
             _append_srt_entry(entries, text, chunk[0], chunk[1])
+
+    for timestamp_key, text_key in (("timestamps", "text"), ("ctc_timestamps", "ctc_text")):
+        token_timestamps = item.get(timestamp_key)
+        if not isinstance(token_timestamps, list):
+            continue
+        token_entries = []
+        for timestamp in token_timestamps:
+            if not isinstance(timestamp, dict):
+                continue
+            token = timestamp.get("token", "")
+            start = _seconds_from_any(_first_present(timestamp, "start", "start_time"))
+            end = _seconds_from_any(_first_present(timestamp, "end", "end_time"))
+            if token and start is not None and end is not None:
+                token_entries.append((start, end, str(token)))
+        if not token_entries:
+            continue
+
+        fallback_text = str(item.get(text_key, "")).strip()
+        if fallback_text:
+            _append_srt_entry(entries, fallback_text, token_entries[0][0], token_entries[-1][1])
+            return
+
+        group_start = None
+        group_end = None
+        group_tokens = []
+        for start, end, token in token_entries:
+            if group_start is None:
+                group_start = start
+            group_end = end
+            group_tokens.append(token)
+            text = "".join(group_tokens)
+            if token in "。！？!?." or (group_end - group_start) >= 6.0:
+                _append_srt_entry(entries, re.sub(r"\s+", " ", text).strip(), group_start, group_end)
+                group_start = None
+                group_end = None
+                group_tokens = []
+        if group_tokens:
+            text = "".join(group_tokens)
+            _append_srt_entry(entries, re.sub(r"\s+", " ", text).strip(), group_start, group_end)
+        return
 
 
 def _build_srt(result, fallback_text="", fallback_duration=None):

@@ -20,9 +20,9 @@ Fun-ASR-Nano-2512
 SenseVoiceSmall
 ```
 
-Use `Fun-ASR-Nano-2512` to test the FunASR README model with multilingual timestamp/SRT behavior.
+Use `Fun-ASR-Nano-2512` for recognition with timestamps.
 
-Use `SenseVoiceSmall` to test the faster SenseVoice path.
+Use `SenseVoiceSmall` for recognition with emotion and event tags.
 
 `Fun-ASR-Nano-2512` is not registered by FunASR 1.1.x by default. The node automatically downloads the small runtime files from `FunAudioLLM/Fun-ASR` into:
 
@@ -74,4 +74,4 @@ The plugin skips FunASR's per-model `requirements.txt` auto-install step at runt
 ## Outputs
 
 - `text`: merged recognized text
-- `srt`: subtitle text in SRT format. The node requests FunASR sentence timestamps when supported; if no segment timestamps are returned, it emits one full-duration subtitle block.
+- `srt`: subtitle text in SRT format. The node reads FunASR `sentence_info`, `timestamp`, `timestamps`, and `ctc_timestamps` fields when available; if no timestamps are returned, it emits one full-duration subtitle block.
