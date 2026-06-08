@@ -1,4 +1,3 @@
-import json
 import os
 import re
 import uuid
@@ -7,7 +6,6 @@ import folder_paths
 
 
 MODEL_CACHE = {}
-MODEL_CHOICES = ["Paraformer-Large", "SenseVoiceSmall"]
 MODEL_CONFIGS = {
     "Paraformer-Large": {
         "id": "iic/speech_paraformer-large-vad-punc_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
@@ -30,16 +28,6 @@ VAD_MODEL_IDS = {
     "hf": "funasr/fsmn-vad",
     "ms": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
 }
-PUNC_MODEL_IDS = {
-    "hf": "funasr/ct-punc",
-    "ms": "iic/punc_ct-transformer_cn-en-common-vocab471067-large",
-}
-SPK_MODEL_IDS = {
-    "hf": "funasr/campplus",
-    "ms": "iic/speech_campplus_sv_zh-cn_16k-common",
-}
-
-
 def _import_error_message(error):
     return (
         "FunASR dependencies are not installed. Install them in ComfyUI's Python environment:\n"
@@ -110,14 +98,6 @@ def _ensure_model(model_id, local_dir, hub, label):
     return local_dir
 
 
-def _optional_pipeline_model(config, choice, local_dir_name, ids, label):
-    if not choice or choice == "none":
-        return None
-    model_id = ids[config["hub"]]
-    model_dir = os.path.join(config["dir"], local_dir_name)
-    return _ensure_model(model_id, model_dir, config["hub"], label)
-
-
 def _get_model(model_choice, device):
     config = _model_config(model_choice)
     local_model = _resolve_local_model(model_choice)
@@ -166,28 +146,6 @@ def _get_model(model_choice, device):
     return model
 
 
-def _audio_duration(audio):
-    if not isinstance(audio, dict) or "waveform" not in audio or "sample_rate" not in audio:
-        return None
-    waveform = audio["waveform"]
-    sample_rate = int(audio["sample_rate"])
-    if sample_rate <= 0:
-        return None
-    return float(waveform.shape[-1]) / float(sample_rate)
-
-
-def _audio_file_duration(audio_path):
-    try:
-        import torchaudio
-
-        info = torchaudio.info(audio_path)
-        if info.sample_rate > 0 and info.num_frames > 0:
-            return float(info.num_frames) / float(info.sample_rate)
-    except Exception:
-        pass
-    return None
-
-
 def _save_audio_to_temp(audio):
     try:
         import torchaudio
@@ -199,7 +157,7 @@ def _save_audio_to_temp(audio):
 
     temp_dir = folder_paths.get_temp_directory()
     os.makedirs(temp_dir, exist_ok=True)
-    audio_path = os.path.join(temp_dir, f"sensevoice_{uuid.uuid4().hex}.wav")
+    audio_path = os.path.join(temp_dir, f"funasr_{uuid.uuid4().hex}.wav")
     waveform = audio["waveform"]
     if waveform.ndim == 3:
         waveform = waveform.squeeze(0)
@@ -281,26 +239,6 @@ def _clean_asr_text(text):
     return text.strip()
 
 
-def _split_plain_text(text, max_chars=42):
-    text = _clean_asr_text(text)
-    if not text:
-        return []
-
-    parts = []
-    current = ""
-    for char in text:
-        current += char
-        if _is_sentence_break(char) or len(current) >= max_chars:
-            part = current.strip()
-            if part:
-                parts.append(part)
-            current = ""
-    current = current.strip()
-    if current:
-        parts.append(current)
-    return parts
-
-
 def _append_timestamp_text_entries(entries, text, timestamps):
     text = _clean_asr_text(text)
     if not text:
@@ -334,7 +272,7 @@ def _append_timestamp_text_entries(entries, text, timestamps):
         group_end = end
         group_tokens.append(token)
         text_part = "".join(group_tokens)
-        if _is_sentence_break(token[-1]) or (group_end - group_start) >= 6.0 or len(text_part) >= 42:
+        if _is_sentence_break(token[-1]) or (group_end - group_start) >= 3.0 or len(text_part) >= 22:
             _append_srt_entry(entries, text_part, group_start, group_end)
             group_start = None
             group_end = None
@@ -417,7 +355,7 @@ def _collect_srt_entries_from_item(item, entries):
         return
 
 
-def _build_srt(result, fallback_text="", fallback_duration=None):
+def _build_srt(result):
     items = result if isinstance(result, list) else [result]
     entries = []
     for item in items:
@@ -437,7 +375,7 @@ def _build_srt(result, fallback_text="", fallback_duration=None):
     return ""
 
 
-def _normalize_result(result, fallback_duration=None):
+def _normalize_result(result):
     if isinstance(result, list):
         items = result
     else:
@@ -458,94 +396,45 @@ def _normalize_result(result, fallback_duration=None):
             texts.append(_clean_asr_text(item))
 
     text = "\n".join(part for part in texts if part)
-    srt = _build_srt(result, text, fallback_duration)
+    srt = _build_srt(result)
     return text, srt
 
 
-class SenseVoiceTranscribeAudio:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "audio": ("AUDIO",),
-                "model": (MODEL_CHOICES, {"default": "Paraformer-Large"}),
-                "device": (["auto", "cuda:0", "cpu"],),
-                "batch_size_s": ("INT", {"default": 60, "min": 1, "max": 600, "step": 1}),
-                "unload_model": ("BOOLEAN", {"default": False}),
-            },
-        }
+def _build_srt_with_text(timestamp_result, text):
+    text = _clean_asr_text(text)
+    if not text:
+        return _build_srt(timestamp_result)
 
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("text", "srt")
-    FUNCTION = "transcribe"
-    CATEGORY = "FunASR"
-
-    def transcribe(
-        self,
-        audio,
-        model,
-        device,
-        batch_size_s,
-        unload_model,
-    ):
-        duration = _audio_duration(audio)
-        audio_path = _save_audio_to_temp(audio)
-        try:
-            return SenseVoiceTranscribeFile().transcribe(
-                audio_path,
-                model,
-                device,
-                batch_size_s,
-                unload_model,
-                duration,
-            )
-        finally:
-            try:
-                os.remove(audio_path)
-            except OSError:
-                pass
+    items = timestamp_result if isinstance(timestamp_result, list) else [timestamp_result]
+    patched_items = []
+    used_text = False
+    for item in items:
+        if isinstance(item, dict):
+            patched_item = dict(item)
+            if not used_text:
+                patched_item["text"] = text
+                patched_item.pop("sentence_info", None)
+                patched_item.pop("words", None)
+                timestamps = patched_item.get("timestamp")
+                if isinstance(timestamps, list):
+                    patched_item["timestamp"] = [
+                        [chunk[0], chunk[1]]
+                        if isinstance(chunk, (list, tuple)) and len(chunk) >= 2
+                        else chunk
+                        for chunk in timestamps
+                    ]
+                used_text = True
+            patched_items.append(patched_item)
+        else:
+            patched_items.append(item)
+    return _build_srt(patched_items)
 
 
-class SenseVoiceTranscribeFile:
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "audio_path": ("STRING", {"default": ""}),
-                "model": (MODEL_CHOICES, {"default": "Paraformer-Large"}),
-                "device": (["auto", "cuda:0", "cpu"],),
-                "batch_size_s": ("INT", {"default": 60, "min": 1, "max": 600, "step": 1}),
-                "unload_model": ("BOOLEAN", {"default": False}),
-            },
-        }
-
-    RETURN_TYPES = ("STRING", "STRING")
-    RETURN_NAMES = ("text", "srt")
-    FUNCTION = "transcribe"
-    CATEGORY = "FunASR"
-
-    def transcribe(
-        self,
-        audio_path,
-        model,
-        device,
-        batch_size_s,
-        unload_model,
-        audio_duration=None,
-    ):
-        if not audio_path:
-            raise RuntimeError("audio_path is empty.")
-
-        audio_path = folder_paths.get_annotated_filepath(audio_path)
-        if not os.path.exists(audio_path):
-            raise RuntimeError(f"Audio file not found: {audio_path}")
-        if audio_duration is None:
-            audio_duration = _audio_file_duration(audio_path)
-
+def _infer_audio(audio, model, device, batch_size_s, unload_model):
+    audio_path = _save_audio_to_temp(audio)
+    try:
         infer_device = _get_device(device)
-        config = _model_config(model)
         recognizer = _get_model(model, infer_device)
-
         generate_kwargs = {
             "input": audio_path,
             "cache": {},
@@ -570,15 +459,80 @@ class SenseVoiceTranscribeFile:
                 torch.cuda.empty_cache()
             except Exception:
                 pass
-        return _normalize_result(result, audio_duration)
+        return result
+    finally:
+        try:
+            os.remove(audio_path)
+        except OSError:
+            pass
+
+
+class FunASRTranscribeText:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "device": (["auto", "cuda:0", "cpu"],),
+                "batch_size_s": ("INT", {"default": 60, "min": 1, "max": 600, "step": 1}),
+                "unload_model": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("text",)
+    FUNCTION = "transcribe"
+    CATEGORY = "FunASR"
+
+    def transcribe(
+        self,
+        audio,
+        device,
+        batch_size_s,
+        unload_model,
+    ):
+        result = _infer_audio(audio, "SenseVoiceSmall", device, batch_size_s, unload_model)
+        text, _ = _normalize_result(result)
+        return (text,)
+
+
+class FunASRTranscribeSRT:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "device": (["auto", "cuda:0", "cpu"],),
+                "batch_size_s": ("INT", {"default": 300, "min": 1, "max": 600, "step": 1}),
+                "unload_model": ("BOOLEAN", {"default": False}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING",)
+    RETURN_NAMES = ("srt",)
+    FUNCTION = "transcribe"
+    CATEGORY = "FunASR"
+
+    def transcribe(
+        self,
+        audio,
+        device,
+        batch_size_s,
+        unload_model,
+    ):
+        text_result = _infer_audio(audio, "SenseVoiceSmall", device, batch_size_s, unload_model)
+        text, _ = _normalize_result(text_result)
+        timestamp_result = _infer_audio(audio, "Paraformer-Large", device, batch_size_s, unload_model)
+        srt = _build_srt_with_text(timestamp_result, text)
+        return (srt,)
 
 
 NODE_CLASS_MAPPINGS = {
-    "SenseVoiceTranscribeAudio": SenseVoiceTranscribeAudio,
-    "SenseVoiceTranscribeFile": SenseVoiceTranscribeFile,
+    "FunASRTranscribeText": FunASRTranscribeText,
+    "FunASRTranscribeSRT": FunASRTranscribeSRT,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "SenseVoiceTranscribeAudio": "FunASR Transcribe Audio",
-    "SenseVoiceTranscribeFile": "FunASR Transcribe File",
+    "FunASRTranscribeText": "FunASR Text",
+    "FunASRTranscribeSRT": "FunASR SRT",
 }

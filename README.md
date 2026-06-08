@@ -1,97 +1,59 @@
-# ComfyUI FunASR
+# ComfyUI IFRIT FunASR
 
-这是一个 ComfyUI 自定义节点插件，用于调用 FunASR 做语音识别，并在模型返回真实时间戳时输出 SRT 字幕。
+这是一个 ComfyUI 自定义节点插件，用 FunASR 做语音识别和字幕生成。
 
 ## 节点
 
-- `FunASR Transcribe Audio`
-  - 输入：ComfyUI `AUDIO`
-  - 输出：识别文本、SRT 字幕
-- `FunASR Transcribe File`
-  - 输入：音频文件路径
-  - 输出：识别文本、SRT 字幕
+### FunASR Text
 
-## 模型选择
+- 输入：ComfyUI `AUDIO`
+- 输出：`text`
+- 固定使用：`models\SenseVoiceSmall`
 
-节点的 `model` 下拉框包含：
+这个节点只负责生成识别文本，不生成 SRT。
 
-```text
-Paraformer-Large
-SenseVoiceSmall
-```
+### FunASR SRT
 
-`Paraformer-Large` 适合中文识别和时间戳/SRT 输出。
+- 输入：ComfyUI `AUDIO`
+- 输出：`srt`
+- 文本模型：`models\SenseVoiceSmall`
+- 时间戳模型：`models\Paraformer-Large`
 
-`SenseVoiceSmall` 适合语音识别、情感标签和事件标签。
+这个节点会先用 SenseVoiceSmall 生成文本，再用 Paraformer-Large 返回的真实时间戳生成 SRT。不会按音频总时长平均切假字幕。
 
-## 本地模型目录
+## 模型目录
 
-模型固定放在 ComfyUI 的 `models` 目录下：
+模型固定放在 ComfyUI 的 `models` 目录：
 
 ```text
-F:\code\comfyui\models\Paraformer-Large
 F:\code\comfyui\models\SenseVoiceSmall
+F:\code\comfyui\models\Paraformer-Large
 ```
 
-如果目录不存在，节点会把选中的模型下载到对应固定目录。
+如果目录不存在，节点会把模型下载到对应固定目录。离线部署时请提前放好这些目录。
 
-`Paraformer-Large` 会自动搭配 `fsmn-vad` 进行长音频分段，VAD 模型会放在：
+Paraformer-Large 会额外使用 VAD 模型，目录为：
 
 ```text
 F:\code\comfyui\models\Paraformer-Large\fsmn-vad
-F:\code\comfyui\models\SenseVoiceSmall\fsmn-vad
 ```
-
-离线部署时，请提前把上述模型目录放好。
-
-## 依赖
-
-在 ComfyUI 的 Python 环境中安装依赖：
-
-```powershell
-F:\code\comfyui\.ext\python.exe -m pip install funasr huggingface_hub modelscope transformers torchaudio
-```
-
-建议使用较新的 FunASR 版本。当前节点按 FunASR 1.3.x 的返回结构适配。
-
-节点运行时会跳过 FunASR 模型目录里的 `requirements.txt` 自动安装步骤，避免 ComfyUI 运行过程中额外拉起 pip。
 
 ## 输入参数
 
-- `model`：选择 `Paraformer-Large` 或 `SenseVoiceSmall`
-- `device`：推理设备，支持 `auto`、`cuda:0`、`cpu`
-- `batch_size_s`：推理批处理时长，单位秒
-- `unload_model`：任务结束后是否释放已缓存模型
+- `audio`：ComfyUI 音频对象。
+- `device`：推理设备，支持 `auto`、`cuda:0`、`cpu`。
+- `batch_size_s`：FunASR 推理分段参数，单位秒。
+- `unload_model`：任务结束后是否释放当前节点加载的缓存模型。
 
-## 输出
+节点里没有 `model` 参数。Text 节点固定 SenseVoiceSmall，SRT 节点固定 SenseVoiceSmall + Paraformer-Large。
 
-- `text`：合并后的识别文本
-- `srt`：SRT 字幕文本
+## 依赖
 
-SRT 只会在 FunASR 返回真实时间戳时生成。节点会读取以下字段：
+在 ComfyUI 的 Python 环境中安装：
 
-```text
-sentence_info
-timestamp
-timestamps
-ctc_timestamps
+```powershell
+F:\code\comfyui\.ext\python.exe -m pip install funasr modelscope huggingface_hub transformers torchaudio
 ```
 
-如果模型没有返回真实时间戳，`srt` 会为空，不会用音频总时长硬切假字幕。
+建议使用 FunASR 1.3.x 或更新版本。
 
-当前 SRT 生成逻辑参考 `ComfyUI-AV-FunASR`：优先使用 FunASR 返回的 `timestamp`，再把识别文本按真实时间戳聚合成字幕段；不会平均分配音频时长。
-
-## 使用建议
-
-中文字幕优先使用：
-
-```text
-model=Paraformer-Large
-batch_size_s=300
-```
-
-如果只想要 SenseVoice 的情感/事件标签，可以使用：
-
-```text
-model=SenseVoiceSmall
-```
