@@ -285,34 +285,14 @@ def _split_text_for_srt(text, max_chars=28):
 
     parts = []
     current = ""
-    soft_breaks = {"\uff0c", "\u3001", ","}
-    soft_break_index = None
+    split_marks = {",", "\uff0c", "\u3001", ".", "!", "?", "\u3002", "\uff01", "\uff1f", "\uff1b", ";"}
     for char in text:
         current += char
-        if char in soft_breaks:
-            soft_break_index = len(current)
-        should_flush = False
-        split_index = None
-        if _is_sentence_break(char):
-            should_flush = True
-        elif len(current) >= max_chars:
-            should_flush = True
-            split_index = soft_break_index
-
-        if should_flush:
-            if split_index and split_index > 0:
-                part = current[:split_index].strip()
-                remainder = current[split_index:].strip()
-            else:
-                part = current.strip()
-                remainder = ""
+        if char in split_marks or len(current) >= max_chars:
+            part = current.strip()
             if part:
                 parts.append(part)
-            current = remainder
-            soft_break_index = None
-            for index, value in enumerate(current, start=1):
-                if value in soft_breaks:
-                    soft_break_index = index
+            current = ""
     current = current.strip()
     if current:
         parts.append(current)
@@ -343,6 +323,54 @@ def _alignment_chars_with_positions(text):
 def _alignment_len(text):
     alignment_chars, _, _ = _alignment_chars_with_positions(text)
     return len(alignment_chars)
+
+
+def _alignment_index_ranges(parts):
+    ranges = []
+    cursor = 0
+    for part in parts:
+        length = _alignment_len(part)
+        if length <= 0:
+            ranges.append((cursor, cursor))
+            continue
+        ranges.append((cursor, cursor + length - 1))
+        cursor += length
+    return ranges
+
+
+def _build_alignment_map(source_chars, target_chars):
+    matcher = difflib.SequenceMatcher(None, source_chars, target_chars, autojunk=False)
+    mapping = {}
+    for tag, i1, i2, j1, j2 in matcher.get_opcodes():
+        if tag == "equal":
+            for offset in range(i2 - i1):
+                mapping[i1 + offset] = j1 + offset
+            continue
+        if tag == "replace":
+            source_len = i2 - i1
+            target_len = j2 - j1
+            if source_len <= 0 or target_len <= 0:
+                continue
+            for offset in range(source_len):
+                if source_len == 1:
+                    target_offset = 0
+                else:
+                    target_offset = round(offset * (target_len - 1) / (source_len - 1))
+                mapping[i1 + offset] = j1 + target_offset
+    return mapping
+
+
+def _nearest_mapped_index(mapping, source_index, source_len, direction):
+    if source_index in mapping:
+        return mapping[source_index]
+    if direction < 0:
+        search_range = range(source_index - 1, -1, -1)
+    else:
+        search_range = range(source_index + 1, source_len)
+    for candidate in search_range:
+        if candidate in mapping:
+            return mapping[candidate]
+    return None
 
 
 def _clean_srt_text(text):
@@ -632,39 +660,46 @@ def _append_aligned_srt_entries(entries, timestamp_result, text):
     if len(timed_segments) < 2:
         return False
 
-    sense_parts = [_clean_srt_text(part) for part in _split_text_for_srt(text)]
+    raw_sense_parts = _split_text_for_srt(text)
+    sense_parts = [_clean_srt_text(part) for part in raw_sense_parts]
     sense_parts = [part for part in sense_parts if part]
     if len(sense_parts) < 2:
         return False
 
-    reference_text = "".join(segment_text for _, _, segment_text in timed_segments)
-    timed_text_parts = _split_text_by_reference_parts(text, reference_text, sense_parts)
-    if len(timed_text_parts) != len(sense_parts):
-        timed_text_parts = _split_text_by_weights(
-            reference_text,
-            [_alignment_len(part) for part in sense_parts],
-        )
-    if len(timed_text_parts) != len(sense_parts):
+    sense_chars = []
+    for part in raw_sense_parts:
+        sense_chars.extend(_alignment_chars_with_positions(part)[0])
+    para_chars = []
+    para_token_indexes = []
+    for index, (_, _, segment_text) in enumerate(timed_segments):
+        chars = _alignment_chars_with_positions(segment_text)[0]
+        para_chars.extend(chars)
+        para_token_indexes.extend([index] * len(chars))
+
+    if not sense_chars or not para_chars or not para_token_indexes:
         return False
 
-    segment_cursor = 0
-    for sense_part, timed_part in zip(sense_parts, timed_text_parts):
-        part_len = max(1, _alignment_len(timed_part))
-        consumed = 0
-        start = None
-        end = None
-        while segment_cursor < len(timed_segments):
-            segment_start, segment_end, segment_text = timed_segments[segment_cursor]
-            segment_len = max(1, _alignment_len(segment_text))
-            if start is None:
-                start = segment_start
-            end = segment_end
-            consumed += segment_len
-            segment_cursor += 1
-            if consumed >= part_len:
-                break
-        if start is None or end is None:
-            break
+    mapping = _build_alignment_map(sense_chars, para_chars)
+    if not mapping:
+        return False
+
+    for sense_part, (sense_start, sense_end) in zip(sense_parts, _alignment_index_ranges(raw_sense_parts)):
+        if sense_end < sense_start:
+            continue
+        para_start_char = _nearest_mapped_index(mapping, sense_start, len(sense_chars), 1)
+        para_end_char = _nearest_mapped_index(mapping, sense_end, len(sense_chars), -1)
+        if para_start_char is None or para_end_char is None:
+            continue
+        if para_end_char < para_start_char:
+            para_start_char, para_end_char = para_end_char, para_start_char
+        para_start_char = max(0, min(para_start_char, len(para_token_indexes) - 1))
+        para_end_char = max(0, min(para_end_char, len(para_token_indexes) - 1))
+        token_start = para_token_indexes[para_start_char]
+        token_end = para_token_indexes[para_end_char]
+        if token_end < token_start:
+            token_start, token_end = token_end, token_start
+        start = timed_segments[token_start][0]
+        end = timed_segments[token_end][1]
         _append_srt_entry(entries, sense_part, start, end)
     return bool(entries)
 
@@ -676,7 +711,6 @@ def _extract_time_ranges_from_item(item):
     ranges = []
     sentence_info = item.get("sentence_info")
     if isinstance(sentence_info, list):
-        sentence_entries_before = len(entries)
         for sentence in sentence_info:
             if not isinstance(sentence, dict):
                 continue

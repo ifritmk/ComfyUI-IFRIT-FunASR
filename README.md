@@ -23,7 +23,9 @@
 
 这个节点会先用 SenseVoiceSmall 生成文本，再用 Paraformer-Large 返回的真实时间戳生成 SRT。不会按音频总时长平均切假字幕。
 
-SRT 文本会按 SenseVoiceSmall 返回的句子和长度拆成多条字幕，再贴到 Paraformer-Large 的时间轴上。中文字幕会优先按句号、问号、感叹号分段；句子太长时会回退到最近的逗号或长度上限分段。SRT 输出会去掉标点，便于后续字幕/配音对齐。
+SRT 文本会按 SenseVoiceSmall 返回的标点拆成多条字幕，再贴到 Paraformer-Large 的时间轴上。逗号、句号、问号、感叹号都会分段；SRT 输出会去掉标点。
+
+对齐时会先把 SenseVoiceSmall 文本和 Paraformer-Large 文本都转成纯文字，再用相似度生成位置对照表；每个 SenseVoice 字幕段会通过这张表找到对应的 Paraformer token 时间戳范围。
 
 ## 模型目录
 
