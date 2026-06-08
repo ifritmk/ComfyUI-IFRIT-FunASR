@@ -227,7 +227,7 @@ def _first_present(item, *keys):
 
 
 def _is_sentence_break(token):
-    return token in {".", "!", "\u3002", "\uff01", "\uff1f"}
+    return token in {".", "!", "?", "\u3002", "\uff01", "\uff1f", "\uff1b", ";"}
 
 
 def _clean_asr_text(text):
@@ -237,6 +237,71 @@ def _clean_asr_text(text):
     text = text.replace("\u3000", " ")
     text = re.sub(r"\s+", " ", text)
     return text.strip()
+
+
+def _split_text_for_srt(text, max_chars=28):
+    text = _clean_asr_text(text)
+    if not text:
+        return []
+
+    parts = []
+    current = ""
+    soft_breaks = {"\uff0c", "\u3001", ","}
+    for char in text:
+        current += char
+        if _is_sentence_break(char) or char in soft_breaks or len(current) >= max_chars:
+            part = current.strip()
+            if part:
+                parts.append(part)
+            current = ""
+    current = current.strip()
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _append_weighted_srt_entries(entries, text, time_ranges):
+    parts = _split_text_for_srt(text)
+    if not parts or not time_ranges:
+        return False
+
+    clean_ranges = []
+    for start, end in time_ranges:
+        start = _seconds_from_any(start)
+        end = _seconds_from_any(end)
+        if start is not None and end is not None and end > start:
+            clean_ranges.append((start, end))
+    if not clean_ranges:
+        return False
+
+    clean_ranges.sort(key=lambda value: (value[0], value[1]))
+    total_chars = max(1, sum(len(part) for part in parts))
+    range_index = 0
+    for index, part in enumerate(parts):
+        remaining_parts = len(parts) - index
+        remaining_ranges = len(clean_ranges) - range_index
+        if remaining_ranges <= 0:
+            break
+        if remaining_ranges >= remaining_parts:
+            wanted = max(1, round(len(part) / total_chars * len(clean_ranges)))
+            count = min(wanted, remaining_ranges - remaining_parts + 1)
+            chosen = clean_ranges[range_index : range_index + count]
+            range_index += count
+            _append_srt_entry(entries, part, chosen[0][0], chosen[-1][1])
+            continue
+
+        timeline_start = clean_ranges[range_index][0]
+        timeline_end = clean_ranges[-1][1]
+        remaining_text_chars = max(1, sum(len(value) for value in parts[index:]))
+        cursor = timeline_start
+        for tail_index, tail_part in enumerate(parts[index:], start=index):
+            duration = (timeline_end - timeline_start) * len(tail_part) / remaining_text_chars
+            end = timeline_end if tail_index == len(parts) - 1 else cursor + max(0.6, duration)
+            _append_srt_entry(entries, tail_part, cursor, min(end, timeline_end))
+            cursor = min(end, timeline_end)
+        return True
+
+    return True
 
 
 def _append_timestamp_text_entries(entries, text, timestamps):
@@ -280,6 +345,52 @@ def _append_timestamp_text_entries(entries, text, timestamps):
     if group_tokens:
         _append_srt_entry(entries, "".join(group_tokens), group_start, group_end)
     return True
+
+
+def _extract_time_ranges_from_item(item):
+    if not isinstance(item, dict):
+        return []
+
+    ranges = []
+    sentence_info = item.get("sentence_info")
+    if isinstance(sentence_info, list):
+        for sentence in sentence_info:
+            if not isinstance(sentence, dict):
+                continue
+            start = _first_present(sentence, "start", "start_time")
+            end = _first_present(sentence, "end", "end_time")
+            try:
+                start_value = float(start)
+                end_value = float(end)
+            except (TypeError, ValueError):
+                continue
+            if max(start_value, end_value) > 100:
+                start_value = _seconds_from_milliseconds(start_value)
+                end_value = _seconds_from_milliseconds(end_value)
+            else:
+                start_value = _seconds_from_any(start_value)
+                end_value = _seconds_from_any(end_value)
+            if start_value is not None and end_value is not None and end_value > start_value:
+                ranges.append((start_value, end_value))
+
+    for key in ("timestamp", "timestamps", "ctc_timestamps"):
+        timestamps = item.get(key)
+        if not isinstance(timestamps, list):
+            continue
+        for timestamp in timestamps:
+            if isinstance(timestamp, dict):
+                start = _seconds_from_any(_first_present(timestamp, "start", "start_time"))
+                end = _seconds_from_any(_first_present(timestamp, "end", "end_time"))
+            elif isinstance(timestamp, (list, tuple)) and len(timestamp) >= 2:
+                start = _seconds_from_milliseconds(timestamp[0])
+                end = _seconds_from_milliseconds(timestamp[1])
+            else:
+                continue
+            if start is not None and end is not None and end > start:
+                ranges.append((start, end))
+
+    ranges.sort(key=lambda value: (value[0], value[1]))
+    return ranges
 
 
 def _collect_srt_entries_from_item(item, entries):
@@ -406,6 +517,21 @@ def _build_srt_with_text(timestamp_result, text):
         return _build_srt(timestamp_result)
 
     items = timestamp_result if isinstance(timestamp_result, list) else [timestamp_result]
+    entries = []
+    time_ranges = []
+    for item in items:
+        time_ranges.extend(_extract_time_ranges_from_item(item))
+    if _append_weighted_srt_entries(entries, text, time_ranges):
+        entries.sort(key=lambda entry: (entry[0], entry[1]))
+        blocks = []
+        for index, (start, end, entry_text) in enumerate(entries, start=1):
+            blocks.append(
+                f"{index}\n"
+                f"{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n"
+                f"{entry_text}"
+            )
+        return "\n\n".join(blocks)
+
     patched_items = []
     used_text = False
     for item in items:

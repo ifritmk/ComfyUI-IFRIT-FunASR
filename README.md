@@ -21,6 +21,8 @@
 
 这个节点会先用 SenseVoiceSmall 生成文本，再用 Paraformer-Large 返回的真实时间戳生成 SRT。不会按音频总时长平均切假字幕。
 
+SRT 文本会按 SenseVoiceSmall 返回的标点和长度拆成多条字幕，再贴到 Paraformer-Large 的时间轴上。
+
 ## 模型目录
 
 模型固定放在 ComfyUI 的 `models` 目录：
@@ -56,4 +58,3 @@ F:\code\comfyui\.ext\python.exe -m pip install funasr modelscope huggingface_hub
 ```
 
 建议使用 FunASR 1.3.x 或更新版本。
-
