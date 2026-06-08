@@ -482,23 +482,6 @@ def _build_srt(result, fallback_text="", fallback_duration=None):
     if blocks:
         return "\n\n".join(blocks)
 
-    fallback_text = str(fallback_text or "").strip()
-    fallback_duration = _seconds_from_any(fallback_duration)
-    if fallback_text and fallback_duration and fallback_duration > 0:
-        parts = _split_plain_text(fallback_text)
-        if not parts:
-            return ""
-        block_seconds = fallback_duration / len(parts)
-        blocks = []
-        for index, part in enumerate(parts, start=1):
-            start = (index - 1) * block_seconds
-            end = fallback_duration if index == len(parts) else index * block_seconds
-            blocks.append(
-                f"{index}\n"
-                f"{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n"
-                f"{part}"
-            )
-        return "\n\n".join(blocks)
     return ""
 
 
