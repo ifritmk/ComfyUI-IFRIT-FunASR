@@ -434,6 +434,7 @@ def _infer_audio(audio, model, device, batch_size_s, unload_model):
     audio_path = _save_audio_to_temp(audio)
     try:
         infer_device = _get_device(device)
+        config = _model_config(model)
         recognizer = _get_model(model, infer_device)
         generate_kwargs = {
             "input": audio_path,
@@ -442,6 +443,12 @@ def _infer_audio(audio, model, device, batch_size_s, unload_model):
             "merge_vad": True,
             "merge_length_s": 15,
         }
+        itn_arg = config.get("itn_arg")
+        if itn_arg:
+            generate_kwargs[itn_arg] = True
+        if model == "SenseVoiceSmall":
+            generate_kwargs["language"] = "auto"
+            generate_kwargs["ban_emo_unk"] = False
         if model == "Paraformer-Large":
             generate_kwargs["output_timestamp"] = True
             generate_kwargs["return_time_stamps"] = True
