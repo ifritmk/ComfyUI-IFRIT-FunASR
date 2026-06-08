@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import sys
 import urllib.request
 import uuid
 
@@ -8,6 +9,7 @@ import folder_paths
 
 
 MODEL_CACHE = {}
+NANO_RUNTIME_IMPORTED = False
 MODEL_CHOICES = ["Fun-ASR-Nano-2512", "SenseVoiceSmall"]
 MODEL_CONFIGS = {
     "Fun-ASR-Nano-2512": {
@@ -150,6 +152,30 @@ def _ensure_nano_runtime(config, local_model):
     return model_code.replace("\\", "/")
 
 
+def _import_nano_runtime(model_code):
+    global NANO_RUNTIME_IMPORTED
+    if NANO_RUNTIME_IMPORTED:
+        return
+
+    runtime_dir = os.path.dirname(model_code)
+    if runtime_dir not in sys.path:
+        sys.path.insert(0, runtime_dir)
+
+    try:
+        from funasr.utils.dynamic_import import import_module_from_path
+        from funasr.register import tables
+    except Exception as e:
+        raise RuntimeError(_import_error_message(e))
+
+    import_module_from_path(model_code)
+    if tables.model_classes.get("FunASRNano") is None:
+        raise RuntimeError(
+            "Fun-ASR-Nano-2512 runtime loaded, but FunASRNano was not registered.\n"
+            f"runtime: {model_code}"
+        )
+    NANO_RUNTIME_IMPORTED = True
+
+
 def _optional_pipeline_model(config, choice, local_dir_name, ids, label):
     if not choice or choice == "none":
         return None
@@ -164,6 +190,7 @@ def _get_model(model_choice, vad_model, punc_model, spk_model, device):
     remote_code = None
     if model_choice == "Fun-ASR-Nano-2512":
         remote_code = _ensure_nano_runtime(config, local_model)
+        _import_nano_runtime(remote_code)
 
     local_vad_model = None
     local_punc_model = None
