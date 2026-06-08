@@ -1,21 +1,43 @@
 import json
 import os
+import urllib.request
 import uuid
 
 import folder_paths
 
 
 MODEL_CACHE = {}
-DEFAULT_MODEL_DIR = os.path.join(folder_paths.models_dir, "SenseVoiceSmall")
-MODEL_ID = "iic/SenseVoiceSmall"
-VAD_MODEL_ID = "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch"
-VAD_MODEL_DIR = os.path.join(DEFAULT_MODEL_DIR, "fsmn-vad")
+MODEL_CHOICES = ["Fun-ASR-Nano-2512", "SenseVoiceSmall"]
+MODEL_CONFIGS = {
+    "Fun-ASR-Nano-2512": {
+        "id": "FunAudioLLM/Fun-ASR-Nano-2512",
+        "dir": os.path.join(folder_paths.models_dir, "Fun-ASR-Nano-2512"),
+        "runtime_url": "https://raw.githubusercontent.com/FunAudioLLM/Fun-ASR/main",
+        "hub": "hf",
+        "trust_remote_code": True,
+        "itn_arg": "itn",
+        "sentence_timestamp": True,
+    },
+    "SenseVoiceSmall": {
+        "id": "iic/SenseVoiceSmall",
+        "dir": os.path.join(folder_paths.models_dir, "SenseVoiceSmall"),
+        "hub": "ms",
+        "trust_remote_code": False,
+        "itn_arg": "use_itn",
+        "sentence_timestamp": True,
+    },
+}
+VAD_MODEL_IDS = {
+    "hf": "funasr/fsmn-vad",
+    "ms": "iic/speech_fsmn_vad_zh-cn-16k-common-pytorch",
+}
+NANO_RUNTIME_FILES = ("model.py", "ctc.py", "tools/utils.py")
 
 
 def _import_error_message(error):
     return (
-        "SenseVoice dependencies are not installed. Install them in ComfyUI's Python environment:\n"
-        "F:\\code\\comfyui\\.ext\\python.exe -m pip install funasr modelscope torchaudio\n"
+        "FunASR dependencies are not installed. Install them in ComfyUI's Python environment:\n"
+        "F:\\code\\comfyui\\.ext\\python.exe -m pip install funasr huggingface_hub transformers torchaudio\n"
         f"Original error: {error}"
     )
 
@@ -31,51 +53,113 @@ def _get_device(device):
         return "cpu"
 
 
-def _resolve_local_model():
-    local_model = os.path.abspath(DEFAULT_MODEL_DIR)
-    if os.path.isdir(local_model):
-        return local_model
+def _snapshot_download(model_id, local_dir, hub, label):
+    if hub == "hf":
+        try:
+            from huggingface_hub import snapshot_download
+        except Exception as e:
+            raise RuntimeError(_import_error_message(e))
+        print(f"[FunASR] Downloading {label} to {local_dir}")
+        snapshot_download(repo_id=model_id, local_dir=local_dir)
+        return
 
     try:
         from modelscope import snapshot_download
     except Exception as e:
         raise RuntimeError(_import_error_message(e))
+    print(f"[FunASR] Downloading {label} to {local_dir}")
+    snapshot_download(model_id, local_dir=local_dir)
+
+
+def _model_config(model_choice):
+    if model_choice not in MODEL_CONFIGS:
+        raise RuntimeError(f"Unsupported FunASR model: {model_choice}")
+    return MODEL_CONFIGS[model_choice]
+
+
+def _resolve_local_model(model_choice):
+    config = _model_config(model_choice)
+    local_model = os.path.abspath(config["dir"])
+    if os.path.isdir(local_model):
+        return local_model
 
     os.makedirs(local_model, exist_ok=True)
-    print(f"[SenseVoice] Downloading {MODEL_ID} to {local_model}")
-    snapshot_download(MODEL_ID, local_dir=local_model)
+    _snapshot_download(config["id"], local_model, config["hub"], model_choice)
     if os.path.isdir(local_model):
         return local_model
 
     raise RuntimeError(
-        "SenseVoiceSmall download failed or model folder is not available:\n"
+        f"{model_choice} download failed or model folder is not available:\n"
         f"{local_model}"
     )
 
 
-def _ensure_modelscope_model(model_id, local_dir, label):
+def _ensure_model(model_id, local_dir, hub, label):
     local_dir = os.path.abspath(local_dir)
     if os.path.isdir(local_dir) and os.listdir(local_dir):
         return local_dir
 
-    try:
-        from modelscope import snapshot_download
-    except Exception as e:
-        raise RuntimeError(_import_error_message(e))
-
     os.makedirs(local_dir, exist_ok=True)
-    print(f"[SenseVoice] Downloading {label} to {local_dir}")
-    snapshot_download(model_id, local_dir=local_dir)
+    _snapshot_download(model_id, local_dir, hub, label)
     return local_dir
 
 
-def _get_model(vad_model, device):
-    local_model = _resolve_local_model()
+def _download_text_file(url, path):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    print(f"[FunASR] Downloading runtime file: {url}")
+    with urllib.request.urlopen(url, timeout=60) as response:
+        data = response.read()
+    with open(path, "wb") as file:
+        file.write(data)
+
+
+def _ensure_nano_runtime(config, local_model):
+    runtime_dir = os.path.join(local_model, "runtime")
+    runtime_url = config["runtime_url"].rstrip("/")
+    missing = []
+    for name in NANO_RUNTIME_FILES:
+        target = os.path.join(runtime_dir, *name.split("/"))
+        if not os.path.exists(target):
+            missing.append((name, target))
+
+    for name, target in missing:
+        _download_text_file(f"{runtime_url}/{name}", target)
+
+    tools_dir = os.path.join(runtime_dir, "tools")
+    os.makedirs(tools_dir, exist_ok=True)
+    init_file = os.path.join(tools_dir, "__init__.py")
+    if not os.path.exists(init_file):
+        with open(init_file, "w", encoding="utf-8") as file:
+            file.write("")
+
+    model_code = os.path.join(runtime_dir, "model.py")
+    if not os.path.exists(model_code):
+        raise RuntimeError(
+            "Fun-ASR-Nano-2512 runtime code is missing. Expected:\n"
+            f"{model_code}"
+        )
+    return model_code.replace("\\", "/")
+
+
+def _get_model(model_choice, vad_model, device):
+    config = _model_config(model_choice)
+    local_model = _resolve_local_model(model_choice)
+    remote_code = None
+    if model_choice == "Fun-ASR-Nano-2512":
+        remote_code = _ensure_nano_runtime(config, local_model)
+
     local_vad_model = None
     if vad_model and vad_model != "none":
-        local_vad_model = _ensure_modelscope_model(VAD_MODEL_ID, VAD_MODEL_DIR, "fsmn-vad")
+        vad_model_id = VAD_MODEL_IDS[config["hub"]]
+        vad_model_dir = os.path.join(config["dir"], "fsmn-vad")
+        if model_choice == "Fun-ASR-Nano-2512" and not (
+            os.path.isdir(vad_model_dir) and os.listdir(vad_model_dir)
+        ):
+            print(f"[FunASR] Skip fsmn-vad for {model_choice}; local VAD model not found: {vad_model_dir}")
+        else:
+            local_vad_model = _ensure_model(vad_model_id, vad_model_dir, config["hub"], "fsmn-vad")
 
-    cache_key = (local_model, local_vad_model or "none", device)
+    cache_key = (model_choice, local_model, local_vad_model or "none", device)
     if cache_key in MODEL_CACHE:
         return MODEL_CACHE[cache_key]
 
@@ -86,16 +170,21 @@ def _get_model(vad_model, device):
         raise RuntimeError(_import_error_message(e))
 
     def skip_model_requirements(requirements_path):
-        print(f"[SenseVoice] Skip model requirements install: {requirements_path}")
+        print(f"[FunASR] Skip model requirements install: {requirements_path}")
         return True
 
     install_model_requirements.install_requirements = skip_model_requirements
 
     kwargs = {
         "model": local_model,
+        "hub": config["hub"],
         "device": device,
         "disable_update": True,
     }
+    if config["trust_remote_code"]:
+        kwargs["trust_remote_code"] = True
+    if remote_code:
+        kwargs["remote_code"] = remote_code
     if local_vad_model:
         kwargs["vad_model"] = local_vad_model
         kwargs["vad_kwargs"] = {"max_single_segment_time": 30000}
@@ -103,6 +192,28 @@ def _get_model(vad_model, device):
     model = AutoModel(**kwargs)
     MODEL_CACHE[cache_key] = model
     return model
+
+
+def _audio_duration(audio):
+    if not isinstance(audio, dict) or "waveform" not in audio or "sample_rate" not in audio:
+        return None
+    waveform = audio["waveform"]
+    sample_rate = int(audio["sample_rate"])
+    if sample_rate <= 0:
+        return None
+    return float(waveform.shape[-1]) / float(sample_rate)
+
+
+def _audio_file_duration(audio_path):
+    try:
+        import torchaudio
+
+        info = torchaudio.info(audio_path)
+        if info.sample_rate > 0 and info.num_frames > 0:
+            return float(info.num_frames) / float(info.sample_rate)
+    except Exception:
+        pass
+    return None
 
 
 def _save_audio_to_temp(audio):
@@ -131,7 +242,7 @@ def _seconds_from_any(value):
         value = float(value)
     except (TypeError, ValueError):
         return None
-    if value > 1000:
+    if value >= 1000:
         value = value / 1000.0
     return max(0.0, value)
 
@@ -174,21 +285,27 @@ def _collect_srt_entries_from_item(item, entries):
                 continue
             _append_srt_entry(
                 entries,
-                sentence.get("text"),
+                sentence.get("text", sentence.get("sentence", "")),
                 _first_present(sentence, "start", "start_time"),
                 _first_present(sentence, "end", "end_time"),
             )
 
     timestamps = item.get("timestamp")
+    words = item.get("words")
     if isinstance(timestamps, list):
-        for chunk in timestamps:
+        for index, chunk in enumerate(timestamps):
             if not isinstance(chunk, (list, tuple)) or len(chunk) < 2:
                 continue
-            text = chunk[2] if len(chunk) > 2 else item.get("text")
+            if len(chunk) > 2:
+                text = chunk[2]
+            elif isinstance(words, list) and index < len(words):
+                text = words[index]
+            else:
+                text = item.get("text")
             _append_srt_entry(entries, text, chunk[0], chunk[1])
 
 
-def _build_srt(result):
+def _build_srt(result, fallback_text="", fallback_duration=None):
     items = result if isinstance(result, list) else [result]
     entries = []
     for item in items:
@@ -202,10 +319,21 @@ def _build_srt(result):
             f"{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n"
             f"{text}"
         )
-    return "\n\n".join(blocks)
+    if blocks:
+        return "\n\n".join(blocks)
+
+    fallback_text = str(fallback_text or "").strip()
+    fallback_duration = _seconds_from_any(fallback_duration)
+    if fallback_text and fallback_duration and fallback_duration > 0:
+        return (
+            "1\n"
+            f"00:00:00,000 --> {_srt_timestamp(fallback_duration)}\n"
+            f"{fallback_text}"
+        )
+    return ""
 
 
-def _normalize_result(result):
+def _normalize_result(result, fallback_duration=None):
     if isinstance(result, list):
         items = result
     else:
@@ -216,16 +344,18 @@ def _normalize_result(result):
         if isinstance(item, dict):
             text = item.get("text")
             if text is None and isinstance(item.get("sentence_info"), list):
-                text = "".join(str(sentence.get("text", "")) for sentence in item["sentence_info"])
+                text = "".join(
+                    str(sentence.get("text", sentence.get("sentence", "")))
+                    for sentence in item["sentence_info"]
+                )
             if text is not None:
                 texts.append(str(text).strip())
         elif item is not None:
             texts.append(str(item).strip())
 
     text = "\n".join(part for part in texts if part)
-    srt = _build_srt(result)
-    raw_json = json.dumps(result, ensure_ascii=False, indent=2, default=str)
-    return text, srt, raw_json
+    srt = _build_srt(result, text, fallback_duration)
+    return text, srt
 
 
 class SenseVoiceTranscribeAudio:
@@ -234,31 +364,35 @@ class SenseVoiceTranscribeAudio:
         return {
             "required": {
                 "audio": ("AUDIO",),
+                "model": (MODEL_CHOICES, {"default": "Fun-ASR-Nano-2512"}),
                 "language": (["auto", "zh", "en", "yue", "ja", "ko", "nospeech"],),
                 "device": (["auto", "cuda:0", "cpu"],),
                 "use_itn": ("BOOLEAN", {"default": True}),
                 "batch_size_s": ("INT", {"default": 60, "min": 1, "max": 600, "step": 1}),
             },
             "optional": {
-                "vad_model": (["fsmn-vad", "none"],),
+                "vad_model": (["none", "fsmn-vad"],),
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("text", "srt", "raw_json")
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "srt")
     FUNCTION = "transcribe"
-    CATEGORY = "SenseVoice"
+    CATEGORY = "FunASR"
 
-    def transcribe(self, audio, language, device, use_itn, batch_size_s, vad_model="fsmn-vad"):
+    def transcribe(self, audio, model, language, device, use_itn, batch_size_s, vad_model="none"):
+        duration = _audio_duration(audio)
         audio_path = _save_audio_to_temp(audio)
         try:
             return SenseVoiceTranscribeFile().transcribe(
                 audio_path,
+                model,
                 language,
                 device,
                 use_itn,
                 batch_size_s,
                 vad_model,
+                duration,
             )
         finally:
             try:
@@ -273,43 +407,51 @@ class SenseVoiceTranscribeFile:
         return {
             "required": {
                 "audio_path": ("STRING", {"default": ""}),
+                "model": (MODEL_CHOICES, {"default": "Fun-ASR-Nano-2512"}),
                 "language": (["auto", "zh", "en", "yue", "ja", "ko", "nospeech"],),
                 "device": (["auto", "cuda:0", "cpu"],),
                 "use_itn": ("BOOLEAN", {"default": True}),
                 "batch_size_s": ("INT", {"default": 60, "min": 1, "max": 600, "step": 1}),
             },
             "optional": {
-                "vad_model": (["fsmn-vad", "none"],),
+                "vad_model": (["none", "fsmn-vad"],),
             },
         }
 
-    RETURN_TYPES = ("STRING", "STRING", "STRING")
-    RETURN_NAMES = ("text", "srt", "raw_json")
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("text", "srt")
     FUNCTION = "transcribe"
-    CATEGORY = "SenseVoice"
+    CATEGORY = "FunASR"
 
-    def transcribe(self, audio_path, language, device, use_itn, batch_size_s, vad_model="fsmn-vad"):
+    def transcribe(self, audio_path, model, language, device, use_itn, batch_size_s, vad_model="none", audio_duration=None):
         if not audio_path:
             raise RuntimeError("audio_path is empty.")
 
         audio_path = folder_paths.get_annotated_filepath(audio_path)
         if not os.path.exists(audio_path):
             raise RuntimeError(f"Audio file not found: {audio_path}")
+        if audio_duration is None:
+            audio_duration = _audio_file_duration(audio_path)
 
         infer_device = _get_device(device)
-        recognizer = _get_model(vad_model, infer_device)
+        config = _model_config(model)
+        recognizer = _get_model(model, vad_model, infer_device)
         language_arg = "auto" if language == "auto" else language
 
-        result = recognizer.generate(
-            input=audio_path,
-            cache={},
-            language=language_arg,
-            use_itn=bool(use_itn),
-            batch_size_s=int(batch_size_s),
-            merge_vad=True,
-            merge_length_s=15,
-        )
-        return _normalize_result(result)
+        generate_kwargs = {
+            "input": audio_path,
+            "cache": {},
+            "language": language_arg,
+            config["itn_arg"]: bool(use_itn),
+            "batch_size_s": int(batch_size_s),
+            "merge_vad": True,
+            "merge_length_s": 15,
+        }
+        if config["sentence_timestamp"] and getattr(recognizer, "punc_model", None) is not None:
+            generate_kwargs["sentence_timestamp"] = True
+
+        result = recognizer.generate(**generate_kwargs)
+        return _normalize_result(result, audio_duration)
 
 
 NODE_CLASS_MAPPINGS = {
@@ -318,6 +460,6 @@ NODE_CLASS_MAPPINGS = {
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "SenseVoiceTranscribeAudio": "SenseVoice Transcribe Audio",
-    "SenseVoiceTranscribeFile": "SenseVoice Transcribe File",
+    "SenseVoiceTranscribeAudio": "FunASR Transcribe Audio",
+    "SenseVoiceTranscribeFile": "FunASR Transcribe File",
 }
