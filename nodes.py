@@ -601,6 +601,9 @@ class SenseVoiceTranscribeFile:
             "merge_vad": True,
             "merge_length_s": 15,
         }
+        if model == "Fun-ASR-Nano-2512":
+            generate_kwargs["batch_size"] = 1
+            generate_kwargs["batch_size_s"] = 1
         if (
             model == "Fun-ASR-Nano-2512"
             and config["sentence_timestamp"]
