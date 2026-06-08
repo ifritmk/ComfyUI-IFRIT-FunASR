@@ -195,8 +195,6 @@ def _seconds_from_any(value):
         value = float(value)
     except (TypeError, ValueError):
         return None
-    if value >= 1000:
-        value = value / 1000.0
     return max(0.0, value)
 
 
