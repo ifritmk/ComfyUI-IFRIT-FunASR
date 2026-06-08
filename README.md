@@ -12,6 +12,8 @@
 
 这个节点只负责生成识别文本，不生成 SRT。
 
+长音频会使用 `fsmn-vad` 分段识别，避免整段音频一次性进入 SenseVoiceSmall 导致显存峰值过高。
+
 ### FunASR SRT
 
 - 输入：ComfyUI `AUDIO`
@@ -38,6 +40,7 @@ Paraformer-Large 会额外使用 VAD 模型，目录为：
 
 ```text
 F:\code\comfyui\models\Paraformer-Large\fsmn-vad
+F:\code\comfyui\models\SenseVoiceSmall\fsmn-vad
 ```
 
 ## 输入参数

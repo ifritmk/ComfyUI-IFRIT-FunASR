@@ -105,7 +105,7 @@ def _get_model(model_choice, device):
     local_model = _resolve_local_model(model_choice)
 
     local_vad_model = None
-    if model_choice == "Paraformer-Large":
+    if model_choice in {"Paraformer-Large", "SenseVoiceSmall"}:
         vad_model_id = VAD_MODEL_IDS[config["hub"]]
         vad_model_dir = os.path.join(config["dir"], "fsmn-vad")
         local_vad_model = _ensure_model(vad_model_id, vad_model_dir, config["hub"], "fsmn-vad")
@@ -901,7 +901,7 @@ class FunASRTranscribeText:
             "required": {
                 "audio": ("AUDIO",),
                 "device": (["auto", "cuda:0", "cpu"],),
-                "batch_size_s": ("INT", {"default": 60, "min": 1, "max": 600, "step": 1}),
+                "batch_size_s": ("INT", {"default": 30, "min": 1, "max": 600, "step": 1}),
                 "unload_model": ("BOOLEAN", {"default": False}),
             },
         }
