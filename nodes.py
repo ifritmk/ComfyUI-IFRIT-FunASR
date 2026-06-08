@@ -249,13 +249,33 @@ def _split_text_for_srt(text, max_chars=28):
     parts = []
     current = ""
     soft_breaks = {"\uff0c", "\u3001", ","}
+    soft_break_index = None
     for char in text:
         current += char
-        if _is_sentence_break(char) or char in soft_breaks or len(current) >= max_chars:
-            part = current.strip()
+        if char in soft_breaks:
+            soft_break_index = len(current)
+        should_flush = False
+        split_index = None
+        if _is_sentence_break(char):
+            should_flush = True
+        elif len(current) >= max_chars:
+            should_flush = True
+            split_index = soft_break_index
+
+        if should_flush:
+            if split_index and split_index > 0:
+                part = current[:split_index].strip()
+                remainder = current[split_index:].strip()
+            else:
+                part = current.strip()
+                remainder = ""
             if part:
                 parts.append(part)
-            current = ""
+            current = remainder
+            soft_break_index = None
+            for index, value in enumerate(current, start=1):
+                if value in soft_breaks:
+                    soft_break_index = index
     current = current.strip()
     if current:
         parts.append(current)
@@ -366,14 +386,13 @@ def _append_weighted_srt_entries(entries, text, time_ranges):
     return True
 
 
-def _split_text_by_reference(reference_text, target_text, max_chars=28):
+def _split_text_by_reference_parts(reference_text, target_text, reference_parts):
     target_alignment_chars, target_positions, target_chars = _alignment_chars_with_positions(target_text)
     if not target_chars:
         return []
 
-    reference_parts = _split_text_for_srt(reference_text, max_chars=max_chars)
     if not reference_parts:
-        return _split_text_for_srt(target_text, max_chars=max_chars)
+        return []
 
     reference_alignment_chars, _, _ = _alignment_chars_with_positions(reference_text)
     if not reference_alignment_chars or not target_alignment_chars:
@@ -415,6 +434,13 @@ def _split_text_by_reference(reference_text, target_text, max_chars=28):
         ref_cursor = ref_end
 
     return [part for part in parts if part]
+
+
+def _split_text_by_reference(reference_text, target_text, max_chars=28):
+    reference_parts = _split_text_for_srt(reference_text, max_chars=max_chars)
+    if not reference_parts:
+        return _split_text_for_srt(target_text, max_chars=max_chars)
+    return _split_text_by_reference_parts(reference_text, target_text, reference_parts)
 
 
 def _append_timestamp_text_entries(entries, text, timestamps):
@@ -555,20 +581,40 @@ def _append_aligned_srt_entries(entries, timestamp_result, text):
     if len(timed_segments) < 2:
         return False
 
-    reference_text = "".join(segment_text for _, _, segment_text in timed_segments)
-    aligned_parts = _split_text_by_reference(reference_text, text)
-    if not aligned_parts:
-        weights = [_alignment_len(segment_text) for _, _, segment_text in timed_segments]
-        aligned_parts = _split_text_by_weights(text, weights)
-    if not aligned_parts:
+    sense_parts = [_clean_srt_text(part) for part in _split_text_for_srt(text)]
+    sense_parts = [part for part in sense_parts if part]
+    if len(sense_parts) < 2:
         return False
 
-    if len(aligned_parts) != len(timed_segments):
-        weights = [_alignment_len(segment_text) for _, _, segment_text in timed_segments]
-        aligned_parts = _split_text_by_weights(text, weights)
+    reference_text = "".join(segment_text for _, _, segment_text in timed_segments)
+    timed_text_parts = _split_text_by_reference_parts(text, reference_text, sense_parts)
+    if len(timed_text_parts) != len(sense_parts):
+        timed_text_parts = _split_text_by_weights(
+            reference_text,
+            [_alignment_len(part) for part in sense_parts],
+        )
+    if len(timed_text_parts) != len(sense_parts):
+        return False
 
-    for (start, end, _), part in zip(timed_segments, aligned_parts):
-        _append_srt_entry(entries, _clean_srt_text(part), start, end)
+    segment_cursor = 0
+    for sense_part, timed_part in zip(sense_parts, timed_text_parts):
+        part_len = max(1, _alignment_len(timed_part))
+        consumed = 0
+        start = None
+        end = None
+        while segment_cursor < len(timed_segments):
+            segment_start, segment_end, segment_text = timed_segments[segment_cursor]
+            segment_len = max(1, _alignment_len(segment_text))
+            if start is None:
+                start = segment_start
+            end = segment_end
+            consumed += segment_len
+            segment_cursor += 1
+            if consumed >= part_len:
+                break
+        if start is None or end is None:
+            break
+        _append_srt_entry(entries, sense_part, start, end)
     return bool(entries)
 
 
