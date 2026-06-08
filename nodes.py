@@ -313,6 +313,46 @@ def _split_plain_text(text, max_chars=42):
     return parts
 
 
+def _append_timestamp_text_entries(entries, text, timestamps):
+    text = _clean_asr_text(text)
+    if not text:
+        return False
+
+    clean_timestamps = []
+    for chunk in timestamps:
+        if isinstance(chunk, (list, tuple)) and len(chunk) >= 2:
+            start = _seconds_from_milliseconds(chunk[0])
+            end = _seconds_from_milliseconds(chunk[1])
+            if start is not None and end is not None:
+                clean_timestamps.append((start, end))
+    if not clean_timestamps:
+        return False
+
+    chars = [char for char in text if not char.isspace()]
+    if not chars:
+        return False
+
+    group_start = None
+    group_end = None
+    group_chars = []
+    usable = min(len(chars), len(clean_timestamps))
+    for index in range(usable):
+        char = chars[index]
+        start, end = clean_timestamps[index]
+        if group_start is None:
+            group_start = start
+        group_end = end
+        group_chars.append(char)
+        if _is_sentence_break(char) or (group_end - group_start) >= 6.0 or len(group_chars) >= 42:
+            _append_srt_entry(entries, "".join(group_chars), group_start, group_end)
+            group_start = None
+            group_end = None
+            group_chars = []
+    if group_chars:
+        _append_srt_entry(entries, "".join(group_chars), group_start, group_end)
+    return True
+
+
 def _collect_srt_entries_from_item(item, entries):
     if not isinstance(item, dict):
         return
@@ -336,6 +376,7 @@ def _collect_srt_entries_from_item(item, entries):
     timestamps = item.get("timestamp")
     words = item.get("words")
     if isinstance(timestamps, list):
+        timestamp_entries_before = len(entries)
         for index, chunk in enumerate(timestamps):
             if not isinstance(chunk, (list, tuple)) or len(chunk) < 2:
                 continue
@@ -346,6 +387,8 @@ def _collect_srt_entries_from_item(item, entries):
             else:
                 continue
             _append_srt_entry(entries, text, chunk[0], chunk[1], milliseconds=True)
+        if len(entries) == timestamp_entries_before:
+            _append_timestamp_text_entries(entries, item.get("text", ""), timestamps)
 
     for timestamp_key, text_key in (("timestamps", "text"), ("ctc_timestamps", "ctc_text")):
         token_timestamps = item.get(timestamp_key)
@@ -546,7 +589,7 @@ class SenseVoiceTranscribeFile:
             "merge_vad": True,
             "merge_length_s": 15,
         }
-        if model == "SenseVoiceSmall" and spk_model != "none":
+        if model == "Paraformer-Large" or (model == "SenseVoiceSmall" and spk_model != "none"):
             generate_kwargs["output_timestamp"] = True
             generate_kwargs["return_time_stamps"] = True
         if (
