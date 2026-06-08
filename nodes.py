@@ -1,6 +1,7 @@
 import difflib
 import os
 import re
+import unicodedata
 import uuid
 
 import folder_paths
@@ -265,6 +266,43 @@ def _chars_no_space(text):
     return [char for char in _clean_asr_text(text) if not char.isspace()]
 
 
+def _is_alignment_char(char):
+    if not char or char.isspace():
+        return False
+    return not unicodedata.category(char).startswith(("P", "S"))
+
+
+def _alignment_chars_with_positions(text):
+    text_chars = _chars_no_space(text)
+    alignment_chars = []
+    positions = []
+    for index, char in enumerate(text_chars):
+        if _is_alignment_char(char):
+            alignment_chars.append(char)
+            positions.append(index)
+    return alignment_chars, positions, text_chars
+
+
+def _alignment_len(text):
+    alignment_chars, _, _ = _alignment_chars_with_positions(text)
+    return len(alignment_chars)
+
+
+def _clean_srt_text(text):
+    chars = []
+    previous_space = False
+    for char in _clean_asr_text(text):
+        if char.isspace():
+            if chars and not previous_space:
+                chars.append(" ")
+                previous_space = True
+            continue
+        if _is_alignment_char(char):
+            chars.append(char)
+            previous_space = False
+    return "".join(chars).strip()
+
+
 def _split_text_by_weights(text, weights):
     chars = _chars_no_space(text)
     if not chars or not weights:
@@ -279,7 +317,7 @@ def _split_text_by_weights(text, weights):
         else:
             end = round(len(chars) * sum(max(1, int(value)) for value in weights[: index + 1]) / total_weight)
             end = max(cursor + 1, min(end, len(chars) - (len(weights) - index - 1)))
-        parts.append("".join(chars[cursor:end]).strip())
+        parts.append(_clean_srt_text("".join(chars[cursor:end])))
         cursor = end
     return parts
 
@@ -311,7 +349,7 @@ def _append_weighted_srt_entries(entries, text, time_ranges):
             count = min(wanted, remaining_ranges - remaining_parts + 1)
             chosen = clean_ranges[range_index : range_index + count]
             range_index += count
-            _append_srt_entry(entries, part, chosen[0][0], chosen[-1][1])
+            _append_srt_entry(entries, _clean_srt_text(part), chosen[0][0], chosen[-1][1])
             continue
 
         timeline_start = clean_ranges[range_index][0]
@@ -321,7 +359,7 @@ def _append_weighted_srt_entries(entries, text, time_ranges):
         for tail_index, tail_part in enumerate(parts[index:], start=index):
             duration = (timeline_end - timeline_start) * len(tail_part) / remaining_text_chars
             end = timeline_end if tail_index == len(parts) - 1 else cursor + max(0.6, duration)
-            _append_srt_entry(entries, tail_part, cursor, min(end, timeline_end))
+            _append_srt_entry(entries, _clean_srt_text(tail_part), cursor, min(end, timeline_end))
             cursor = min(end, timeline_end)
         return True
 
@@ -329,7 +367,7 @@ def _append_weighted_srt_entries(entries, text, time_ranges):
 
 
 def _split_text_by_reference(reference_text, target_text, max_chars=28):
-    target_chars = _chars_no_space(target_text)
+    target_alignment_chars, target_positions, target_chars = _alignment_chars_with_positions(target_text)
     if not target_chars:
         return []
 
@@ -337,12 +375,12 @@ def _split_text_by_reference(reference_text, target_text, max_chars=28):
     if not reference_parts:
         return _split_text_for_srt(target_text, max_chars=max_chars)
 
-    reference_chars = _chars_no_space(reference_text)
-    if not reference_chars:
-        weights = [len(_chars_no_space(part)) for part in reference_parts]
+    reference_alignment_chars, _, _ = _alignment_chars_with_positions(reference_text)
+    if not reference_alignment_chars or not target_alignment_chars:
+        weights = [_alignment_len(part) for part in reference_parts]
         return _split_text_by_weights(target_text, weights)
 
-    matcher = difflib.SequenceMatcher(None, reference_chars, target_chars, autojunk=False)
+    matcher = difflib.SequenceMatcher(None, reference_alignment_chars, target_alignment_chars, autojunk=False)
     mapped_positions = {}
     for tag, i1, i2, j1, j2 in matcher.get_opcodes():
         if tag in {"equal", "replace"}:
@@ -354,7 +392,7 @@ def _split_text_by_reference(reference_text, target_text, max_chars=28):
     ref_cursor = 0
     target_cursor = 0
     for index, reference_part in enumerate(reference_parts):
-        ref_len = len(_chars_no_space(reference_part))
+        ref_len = _alignment_len(reference_part)
         ref_end = ref_cursor + ref_len
         if index == len(reference_parts) - 1:
             target_end = len(target_chars)
@@ -365,11 +403,14 @@ def _split_text_by_reference(reference_text, target_text, max_chars=28):
                 if pos in mapped_positions
             ]
             if candidates:
-                target_end = max(candidates) + 1
+                target_alignment_end = max(candidates)
+                target_end = target_positions[target_alignment_end] + 1
             else:
-                target_end = round(len(target_chars) * ref_end / max(1, len(reference_chars)))
+                target_alignment_end = round(len(target_alignment_chars) * ref_end / max(1, len(reference_alignment_chars)))
+                target_alignment_end = max(0, min(target_alignment_end, len(target_positions) - 1))
+                target_end = target_positions[target_alignment_end] + 1
             target_end = max(target_cursor + 1, min(target_end, len(target_chars) - (len(reference_parts) - index - 1)))
-        parts.append("".join(target_chars[target_cursor:target_end]).strip())
+        parts.append(_clean_srt_text("".join(target_chars[target_cursor:target_end])))
         target_cursor = target_end
         ref_cursor = ref_end
 
@@ -396,6 +437,10 @@ def _append_timestamp_text_entries(entries, text, timestamps):
         tokens = [char for char in text if not char.isspace()]
     if not tokens:
         return False
+    if len(clean_timestamps) == 1:
+        start, end = clean_timestamps[0]
+        _append_srt_entry(entries, text, start, end)
+        return True
 
     group_start = None
     group_end = None
@@ -513,17 +558,17 @@ def _append_aligned_srt_entries(entries, timestamp_result, text):
     reference_text = "".join(segment_text for _, _, segment_text in timed_segments)
     aligned_parts = _split_text_by_reference(reference_text, text)
     if not aligned_parts:
-        weights = [len(_chars_no_space(segment_text)) for _, _, segment_text in timed_segments]
+        weights = [_alignment_len(segment_text) for _, _, segment_text in timed_segments]
         aligned_parts = _split_text_by_weights(text, weights)
     if not aligned_parts:
         return False
 
     if len(aligned_parts) != len(timed_segments):
-        weights = [len(_chars_no_space(segment_text)) for _, _, segment_text in timed_segments]
+        weights = [_alignment_len(segment_text) for _, _, segment_text in timed_segments]
         aligned_parts = _split_text_by_weights(text, weights)
 
     for (start, end, _), part in zip(timed_segments, aligned_parts):
-        _append_srt_entry(entries, part, start, end)
+        _append_srt_entry(entries, _clean_srt_text(part), start, end)
     return bool(entries)
 
 
@@ -655,8 +700,11 @@ def _build_srt(result):
     entries.sort(key=lambda entry: (entry[0], entry[1]))
     blocks = []
     for index, (start, end, text) in enumerate(entries, start=1):
+        text = _clean_srt_text(text)
+        if not text:
+            continue
         blocks.append(
-            f"{index}\n"
+            f"{len(blocks) + 1}\n"
             f"{_srt_timestamp(start)} --> {_srt_timestamp(end)}\n"
             f"{text}"
         )
